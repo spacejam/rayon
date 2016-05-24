@@ -26,21 +26,21 @@ use self::zip::ZipIter;
 
 pub mod collect;
 pub mod enumerate;
+pub mod internal;
 pub mod filter;
 pub mod filter_map;
 pub mod flat_map;
-pub mod internal;
-pub mod len;
-pub mod for_each;
 #[cfg(feature = "unstable")]
 pub mod fold;
+pub mod for_each;
+pub mod len;
+pub mod map;
+pub mod range;
 pub mod reduce;
 pub mod slice;
 pub mod slice_mut;
-pub mod map;
-pub mod zip;
-pub mod range;
 pub mod vec;
+pub mod zip;
 
 #[cfg(test)]
 mod test;
