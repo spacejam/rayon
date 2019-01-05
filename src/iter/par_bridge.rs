@@ -1,6 +1,6 @@
-use crossbeam_deque::{Deque, Steal, Stealer};
+use crossbeam_deque::{fifo, Steal, Stealer, Worker};
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 use std::sync::{Mutex, TryLockError};
 use std::thread::yield_now;
 
@@ -79,14 +79,15 @@ where
         C: UnindexedConsumer<Self::Item>,
     {
         let split_count = AtomicUsize::new(current_num_threads());
-        let deque = Deque::new();
-        let stealer = deque.stealer();
+        let fuzzy_deque_len = AtomicIsize::new(0);
+        let (deque, stealer) = fifo();
         let done = AtomicBool::new(false);
         let iter = Mutex::new((self.iter, deque));
 
         bridge_unindexed(
             IterParallelProducer {
                 split_count: &split_count,
+                fuzzy_deque_len: &fuzzy_deque_len,
                 done: &done,
                 iter: &iter,
                 items: stealer,
@@ -98,8 +99,9 @@ where
 
 struct IterParallelProducer<'a, Iter: Iterator + 'a> {
     split_count: &'a AtomicUsize,
+    fuzzy_deque_len: &'a AtomicIsize,
     done: &'a AtomicBool,
-    iter: &'a Mutex<(Iter, Deque<Iter::Item>)>,
+    iter: &'a Mutex<(Iter, Worker<Iter::Item>)>,
     items: Stealer<Iter::Item>,
 }
 
@@ -108,6 +110,7 @@ impl<'a, Iter: Iterator + 'a> Clone for IterParallelProducer<'a, Iter> {
     fn clone(&self) -> Self {
         IterParallelProducer {
             split_count: self.split_count,
+            fuzzy_deque_len: self.fuzzy_deque_len,
             done: self.done,
             iter: self.iter,
             items: self.items.clone(),
@@ -151,6 +154,7 @@ where
         loop {
             match self.items.steal() {
                 Steal::Data(it) => {
+                    self.fuzzy_deque_len.fetch_sub(1, Ordering::SeqCst);
                     folder = folder.consume(it);
                     if folder.full() {
                         return folder;
@@ -164,14 +168,15 @@ where
                         // our cache is out of items, time to load more from the iterator
                         match self.iter.try_lock() {
                             Ok(mut guard) => {
-                                let count = current_num_threads();
+                                let count = current_num_threads() as isize;
                                 let count = (count * count) * 2;
 
                                 let (ref mut iter, ref deque) = *guard;
 
-                                while deque.len() < count {
+                                while self.fuzzy_deque_len.load(Ordering::SeqCst) < count {
                                     if let Some(it) = iter.next() {
                                         deque.push(it);
+                                        self.fuzzy_deque_len.fetch_add(1, Ordering::SeqCst);
                                     } else {
                                         self.done.store(true, Ordering::SeqCst);
                                         break;
